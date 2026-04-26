@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Luggage Tag Generator</title>
+</head>
+
+<body>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: transparent;
+        }
+
+        #app {
+            padding: 1.5rem 0;
+            font-family: var(--font-sans);
+            color: var(--color-text-primary);
+        }
+
+        h2 {
+            font-size: 22px;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .sub {
+            font-size: 14px;
+            color: var(--color-text-secondary);
+            margin-bottom: 1.5rem;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            align-items: start;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+        }
+
+        .field label {
+            display: block;
+            font-size: 13px;
+            color: var(--color-text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .field input[type=text] {
+            width: 100%;
+            font-size: 18px;
+            font-weight: 500;
+            padding: 10px 14px;
+            border-radius: var(--border-radius-md);
+            border: 0.5px solid var(--color-border-secondary);
+            background: var(--color-background-secondary);
+            color: var(--color-text-primary);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .field input[type=range] {
+            width: 100%;
+        }
+
+        .row-label {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .row-label span {
+            font-size: 13px;
+            color: var(--color-text-secondary);
+        }
+
+        .row-label strong {
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .seed-badge {
+            font-size: 11px;
+            color: var(--color-text-tertiary);
+            margin-top: 4px;
+            font-family: var(--font-mono);
+        }
+
+        canvas {
+            width: 100%;
+            border-radius: var(--border-radius-lg);
+            border: 0.5px solid var(--color-border-tertiary);
+            background: #1a1a1a;
+            display: block;
+        }
+
+        button {
+            width: 100%;
+            margin-top: 0.5rem;
+            padding: 10px;
+            font-size: 14px;
+            border-radius: var(--border-radius-md);
+            border: 0.5px solid var(--color-border-secondary);
+            background: var(--color-background-secondary);
+            color: var(--color-text-primary);
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: var(--color-background-tertiary);
+        }
+
+        .complexity-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--color-text-tertiary);
+            margin-top: 2px;
+        }
+    </style>
+
+    <div id="app">
+        <h2>Luggage tag generator</h2>
+        <p class="sub">Every name produces a unique shape — same name always gives the same tag.</p>
+        <div class="layout">
+            <div class="controls">
+                <div class="field">
+                    <label>Your name</label>
+                    <input type="text" id="nameInput" value="LARS" maxlength="12" placeholder="TYPE YOUR NAME" />
+                    <div class="seed-badge" id="seedBadge">seed: 0</div>
+                </div>
+                <div class="field">
+                    <div class="row-label"><span>Tag size</span><strong id="sizeLabel">Medium</strong></div>
+                    <input type="range" id="sizeSlider" min="1" max="3" step="1" value="2" />
+                    <div class="complexity-labels"><span>Small</span><span>Medium</span><span>Large</span></div>
+                </div>
+                <div class="field">
+                    <div class="row-label"><span>Shape complexity</span><strong id="complexLabel">Medium</strong></div>
+                    <input type="range" id="complexSlider" min="1" max="3" step="1" value="2" />
+                    <div class="complexity-labels"><span>Smooth</span><span>Medium</span><span>Spiky</span></div>
+                </div>
+                <div class="field">
+                    <div class="row-label"><span>Text depth</span><strong id="depthLabel">1.0mm</strong></div>
+                    <input type="range" id="depthSlider" min="5" max="20" step="1" value="10" />
+                    <div class="complexity-labels"><span>0.5mm</span><span></span><span>2.0mm</span></div>
+                </div>
+                <button onclick="downloadSTL()">Download STL</button>
+            </div>
+            <div>
+                <canvas id="preview" width="400" height="400"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('preview');
+        const ctx = canvas.getContext('2d');
+
+        function nameToSeed(name) {
+            let s = 0;
+            for (let i = 0; i < name.length; i++) s += name.toUpperCase().charCodeAt(i) * (i + 1);
+            return s;
+        }
+
+        function seededRandom(seed) {
+            let s = seed;
+            return function () {
+                s = (s * 1664525 + 1013904223) & 0xffffffff;
+                return (s >>> 0) / 0xffffffff;
+            };
+        }
+
+        function generatePoints(seed, n, baseR, variance) {
+            const rng = seededRandom(seed);
+            const pts = [];
+            for (let i = 0; i < n; i++) {
+                const angle = (2 * Math.PI * i) / n;
+                const r1 = rng(), r2 = rng();
+                const offset = ((r1 + r2) / 2 - 0.5) * 2 * variance;
+                const r = Math.max(baseR * 0.4, baseR + offset);
+                pts.push([r * Math.cos(angle), r * Math.sin(angle)]);
+            }
+            return pts;
+        }
+
+        function catmullRom(ctx, pts, tension = 0.5) {
+            const n = pts.length;
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 0; i < n; i++) {
+                const p0 = pts[(i - 1 + n) % n];
+                const p1 = pts[i];
+                const p2 = pts[(i + 1) % n];
+                const p3 = pts[(i + 2) % n];
+                const cp1x = p1[0] + (p2[0] - p0[0]) * tension / 3;
+                const cp1y = p1[1] + (p2[1] - p0[1]) * tension / 3;
+                const cp2x = p2[0] - (p3[0] - p1[0]) * tension / 3;
+                const cp2y = p2[1] - (p3[1] - p1[1]) * tension / 3;
+                ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
+            }
+            ctx.closePath();
+        }
+
+        function draw() {
+            const name = document.getElementById('nameInput').value || 'TAG';
+            const sizeVal = parseInt(document.getElementById('sizeSlider').value);
+            const complexVal = parseInt(document.getElementById('complexSlider').value);
+            const depthVal = parseInt(document.getElementById('depthSlider').value);
+
+            const sizeMap = [60, 90, 120];
+            const complexMap = [[16, 0.25], [24, 0.55], [36, 0.85]];
+            const baseR = sizeMap[sizeVal - 1];
+            const [numPts, variance] = complexMap[complexVal - 1];
+            const seed = nameToSeed(name);
+
+            document.getElementById('seedBadge').textContent = `seed: ${seed}`;
+            document.getElementById('sizeLabel').textContent = ['Small', 'Medium', 'Large'][sizeVal - 1];
+            document.getElementById('complexLabel').textContent = ['Smooth', 'Medium', 'Spiky'][complexVal - 1];
+            document.getElementById('depthLabel').textContent = (depthVal / 10).toFixed(1) + 'mm';
+
+            const W = canvas.width, H = canvas.height;
+            const cx = W / 2, cy = H / 2;
+
+            ctx.clearRect(0, 0, W, H);
+
+            const pts = generatePoints(seed, numPts, baseR, variance * baseR);
+            const screenPts = pts.map(([x, y]) => [cx + x, cy + y]);
+
+            ctx.beginPath();
+            catmullRom(ctx, screenPts);
+            ctx.fillStyle = '#2a2a2a';
+            ctx.fill();
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            const top = Math.min(...screenPts.map(p => p[1]));
+            const holeY = top + 18;
+            ctx.beginPath();
+            ctx.arc(cx, holeY, 8, 0, Math.PI * 2);
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fill();
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            const fontSize = Math.max(14, Math.min(32, baseR * 0.38));
+            ctx.font = `500 ${fontSize}px var(--font-sans, sans-serif)`;
+            ctx.fillStyle = '#e0e0e0';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(name.toUpperCase(), cx, cy + 8);
+
+            ctx.font = `400 10px var(--font-mono, monospace)`;
+            ctx.fillStyle = '#555';
+            ctx.fillText(`depth: ${(depthVal / 10).toFixed(1)}mm`, cx, H - 14);
+        }
+
+        function downloadSTL() {
+            const name = document.getElementById('nameInput').value || 'TAG';
+            const sizeVal = parseInt(document.getElementById('sizeSlider').value);
+            const complexVal = parseInt(document.getElementById('complexSlider').value);
+            const depthVal = parseInt(document.getElementById('depthSlider').value);
+
+            const sizeMap = [25, 35, 45];
+            const complexMap = [[16, 0.25], [24, 0.55], [36, 0.85]];
+            const baseR = sizeMap[sizeVal - 1];
+            const [numPts, variance] = complexMap[complexVal - 1];
+            const seed = nameToSeed(name);
+            const thickness = 4;
+            const textDepth = depthVal / 10;
+
+            const pts = generatePoints(seed, numPts, baseR, variance * baseR);
+
+            function norm(v) { const l = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); return [v[0] / l, v[1] / l, v[2] / l]; }
+            function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+
+            const triangles = [];
+
+            function addTri(a, b, c) {
+                const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                const n = norm(cross(ab, ac));
+                triangles.push({ n, verts: [a, b, c] });
+            }
+
+            const smoothPts = [];
+            const N = pts.length;
+            for (let i = 0; i < N; i++) {
+                const prev = pts[(i - 1 + N) % N];
+                const curr = pts[i];
+                const next = pts[(i + 1) % N];
+                smoothPts.push([(prev[0] + curr[0] * 2 + next[0]) / 4, (prev[1] + curr[1] * 2 + next[1]) / 4]);
+            }
+
+            const top = thickness;
+            const bot = 0;
+            const center = [0, 0];
+
+            for (let i = 0; i < N; i++) {
+                const a = smoothPts[i], b = smoothPts[(i + 1) % N];
+                addTri([center[0], center[1], top], [a[0], a[1], top], [b[0], b[1], top]);
+                addTri([center[0], center[1], bot], [b[0], b[1], bot], [a[0], a[1], bot]);
+                addTri([a[0], a[1], bot], [b[0], b[1], bot], [b[0], b[1], top]);
+                addTri([a[0], a[1], bot], [b[0], b[1], top], [a[0], a[1], top]);
+            }
+
+            const topY = Math.min(...smoothPts.map(p => p[1]));
+            const holeR = 3.5, holeSegs = 24;
+            const holeCy = topY + holeR * 2.2;
+            for (let i = 0; i < holeSegs; i++) {
+                const a1 = (2 * Math.PI * i) / holeSegs, a2 = (2 * Math.PI * (i + 1)) / holeSegs;
+                const x1 = holeR * Math.cos(a1), y1 = holeR * Math.sin(a1);
+                const x2 = holeR * Math.cos(a2), y2 = holeR * Math.sin(a2);
+                addTri([x1, holeCy + y1, bot], [x2, holeCy + y2, bot], [0, holeCy, bot]);
+                addTri([x2, holeCy + y2, top], [x1, holeCy + y1, top], [0, holeCy, top]);
+                addTri([x1, holeCy + y1, bot], [x1, holeCy + y1, top], [x2, holeCy + y2, top]);
+                addTri([x1, holeCy + y1, bot], [x2, holeCy + y2, top], [x2, holeCy + y2, bot]);
+            }
+
+            const totalTris = triangles.length;
+            const buf = new ArrayBuffer(84 + totalTris * 50);
+            const view = new DataView(buf);
+            let offset = 80;
+            view.setUint32(offset, totalTris, true); offset += 4;
+            for (const t of triangles) {
+                view.setFloat32(offset, t.n[0], true); offset += 4;
+                view.setFloat32(offset, t.n[1], true); offset += 4;
+                view.setFloat32(offset, t.n[2], true); offset += 4;
+                for (const v of t.verts) {
+                    view.setFloat32(offset, v[0], true); offset += 4;
+                    view.setFloat32(offset, v[1], true); offset += 4;
+                    view.setFloat32(offset, v[2], true); offset += 4;
+                }
+                view.setUint16(offset, 0, true); offset += 2;
+            }
+
+            const blob = new Blob([buf], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `tag_${name.toLowerCase()}.stl`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        document.getElementById('nameInput').addEventListener('input', draw);
+        document.getElementById('sizeSlider').addEventListener('input', draw);
+        document.getElementById('complexSlider').addEventListener('input', draw);
+        document.getElementById('depthSlider').addEventListener('input', draw);
+
+        draw();
+    </script>
+</body>
+
+</html>
