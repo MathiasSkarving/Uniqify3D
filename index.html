@@ -6,7 +6,7 @@
   <title>Uniqify</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet">
-  <style>
+   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
@@ -282,8 +282,8 @@
 <body>
 
 <header>
-  <div class="logo">Tag<span>Forge</span></div>
-  <div class="badge">v0.1 — luggage tags</div>
+  <div class="logo"><span>Uniqify</span></div>
+  <div class="badge">v0.1 — unique tags</div>
 </header>
 
 <main>
@@ -298,10 +298,17 @@
 
       <div class="field">
         <div class="field-header">
-          <span class="field-label">Name</span>
+          <span class="field-label">First name</span>
           <span class="seed-line" id="seedBadge">seed: —</span>
         </div>
         <input type="text" id="nameInput" value="LARS" maxlength="12" placeholder="YOUR NAME" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div class="field">
+        <div class="field-header">
+          <span class="field-label">Surname <span style="color:var(--text3);font-size:11px;font-family:'DM Mono',monospace;">(optional — changes shape)</span></span>
+        </div>
+        <input type="text" id="surnameInput" value="" maxlength="16" placeholder="YOUR SURNAME" autocomplete="off" spellcheck="false" />
       </div>
 
       <div class="divider"></div>
@@ -353,14 +360,56 @@
 
 <footer>tagforge — generative 3d prints — no account needed</footer>
 
+<script src="https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/dist/opentype.min.js"></script>
 <script>
+
+// ============================================================
+//  SETTINGS — tweak these to change how the tag looks/prints
+// ============================================================
+
+const TAG_THICKNESS_MM = 4;    // total tag height in mm
+const HOLE_RADIUS_MM   = 3.5;  // strap hole radius in mm
+const HOLE_MARGIN_MM   = 2;    // min material between hole edge and tag edge
+const HOLE_SEGMENTS    = 24;   // smoothness of the hole circle
+const TEXT_FONT_URL    = 'https://cdn.jsdelivr.net/npm/@fontsource/syne@5.0.18/files/syne-latin-700-normal.woff';
+
+// Size presets (all distances in mm)
+const SIZE_PRESETS = {
+  1: { numPoints: 16, baseRadius: 25 }, // small
+  2: { numPoints: 26, baseRadius: 35 }, // medium
+  3: { numPoints: 38, baseRadius: 45 }, // large
+};
+
+// Complexity levels map to variance fraction (fraction of baseRadius)
+const COMPLEXITY_VARIANCE = [0.22, 0.52, 0.82]; // index 0=Smooth, 1=Medium, 2=Spiky
+
+// Preview scale: canvas pixels per mm
+const PREVIEW_SCALE = 2.8;
+
+// ============================================================
+//  UTILITIES
+// ============================================================
+
+// Converts a name string into a stable integer seed
 function nameToSeed(name) {
-  let s = 0;
-  for (let i = 0; i < name.length; i++) s += name.toUpperCase().charCodeAt(i) * (i + 1);
-  return s;
+  let seed = 0;
+  for (let i = 0; i < name.length; i++) {
+    seed += name.toUpperCase().charCodeAt(i) * (i + 1);
+  }
+  return seed;
 }
 
-function seededRandom(seed) {
+// Combines first name + surname into a single shape seed.
+// The surname adds extra uniqueness without overriding the first name's character.
+function combinedSeed(firstName, surname) {
+  const s1 = nameToSeed(firstName);
+  const s2 = nameToSeed(surname);
+  // Mix the two seeds so even short surnames make a big difference
+  return (s1 * 2654435761 + s2 * 40503) & 0x7fffffff;
+}
+
+// Returns a seeded pseudo-random function (always same sequence for same seed)
+function makeRng(seed) {
   let s = seed === 0 ? 1 : seed;
   return function() {
     s = (s * 1664525 + 1013904223) & 0xffffffff;
@@ -368,181 +417,565 @@ function seededRandom(seed) {
   };
 }
 
-function generatePoints(seed, n, baseR, variance) {
-  const rng = seededRandom(seed);
-  const pts = [];
-  for (let i = 0; i < n; i++) {
-    const angle = (2 * Math.PI * i) / n;
-    const r1 = rng(), r2 = rng();
+// ============================================================
+//  SHAPE GENERATION
+// ============================================================
+
+// Generates the organic outline control points from a seed.
+// Returns array of [x, y] in mm, centered at origin.
+function generateOutlinePoints(seed, numPoints, baseRadius, varianceFraction) {
+  const rng = makeRng(seed);
+  const variance = baseRadius * varianceFraction;
+  const points = [];
+  for (let i = 0; i < numPoints; i++) {
+    const angle  = (2 * Math.PI * i) / numPoints;
+    const r1     = rng(), r2 = rng();
     const offset = ((r1 + r2) / 2 - 0.5) * 2 * variance;
-    const r = Math.max(baseR * 0.4, baseR + offset);
-    pts.push([r * Math.cos(angle), r * Math.sin(angle)]);
+    const radius = Math.max(baseRadius * 0.4, baseRadius + offset);
+    points.push([radius * Math.cos(angle), radius * Math.sin(angle)]);
   }
-  return pts;
+  return points;
 }
 
-function catmullRomCanvas(ctx, pts) {
-  const n = pts.length;
-  const tension = 0.4;
-  ctx.moveTo(pts[0][0], pts[0][1]);
+// Evaluates a single point on a Catmull-Rom spline between p1→p2
+function catmullRomPoint(p0, p1, p2, p3, t, tension = 0.4) {
+  const cp1x = p1[0] + (p2[0] - p0[0]) * tension / 3;
+  const cp1y = p1[1] + (p2[1] - p0[1]) * tension / 3;
+  const cp2x = p2[0] - (p3[0] - p1[0]) * tension / 3;
+  const cp2y = p2[1] - (p3[1] - p1[1]) * tension / 3;
+  const u = 1 - t;
+  return [
+    u*u*u*p1[0] + 3*u*u*t*cp1x + 3*u*t*t*cp2x + t*t*t*p2[0],
+    u*u*u*p1[1] + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*p2[1],
+  ];
+}
+
+// Samples the full closed Catmull-Rom spline into a dense polygon.
+// This is the SINGLE SOURCE OF TRUTH used by both the preview and the STL exporter.
+function sampleSpline(points, samplesPerSegment = 8) {
+  const n = points.length;
+  const result = [];
   for (let i = 0; i < n; i++) {
-    const p0 = pts[(i - 1 + n) % n];
-    const p1 = pts[i];
-    const p2 = pts[(i + 1) % n];
-    const p3 = pts[(i + 2) % n];
-    const cp1x = p1[0] + (p2[0] - p0[0]) * tension / 3;
-    const cp1y = p1[1] + (p2[1] - p0[1]) * tension / 3;
-    const cp2x = p2[0] - (p3[0] - p1[0]) * tension / 3;
-    const cp2y = p2[1] - (p3[1] - p1[1]) * tension / 3;
-    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]);
+    const p0 = points[(i - 1 + n) % n];
+    const p1 = points[i];
+    const p2 = points[(i + 1) % n];
+    const p3 = points[(i + 2) % n];
+    for (let s = 0; s < samplesPerSegment; s++) {
+      result.push(catmullRomPoint(p0, p1, p2, p3, s / samplesPerSegment));
+    }
   }
+  return result;
+}
+
+// ============================================================
+//  LAYOUT COMPUTATION (all in mm)
+//  These values are used identically by the canvas preview
+//  and the STL exporter — compute once, share everywhere.
+// ============================================================
+
+// Point-in-polygon test using ray casting (2D, polygon in XY plane).
+function pointInsidePolygon(px, py, poly) {
+  let inside = false;
+  const N = poly.length;
+  for (let i = 0, j = N - 1; i < N; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1];
+    const xj = poly[j][0], yj = poly[j][1];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Returns true if a circle (cx, cy, r) is fully inside the polygon,
+// with at least `margin` mm clearance from every edge.
+// Checks the circle centre plus N evenly-spaced points on the perimeter.
+function circleInsidePolygon(cx, cy, r, margin, poly, perimeterChecks = 16) {
+  const requiredInset = r + margin;
+
+  // Centre must be inside
+  if (!pointInsidePolygon(cx, cy, poly)) return false;
+
+  // Every point on the circle perimeter must also be inside the polygon.
+  // We test the perimeter points pushed outward by `margin` to enforce clearance.
+  for (let i = 0; i < perimeterChecks; i++) {
+    const angle = (2 * Math.PI * i) / perimeterChecks;
+    const px = cx + requiredInset * Math.cos(angle);
+    const py = cy + requiredInset * Math.sin(angle);
+    if (!pointInsidePolygon(px, py, poly)) return false;
+  }
+  return true;
+}
+
+// Computes the tag layout — hole center Y, text center Y, max text width — all in mm.
+//
+// HOLE: scans downward from the shape top and finds the first Y where a circle of
+// radius HOLE_RADIUS_MM centred at x=0 is fully inside the polygon with HOLE_MARGIN_MM
+// clearance. This is the only watertight guarantee — width checks aren't enough for
+// asymmetric or concave shapes.
+//
+// TEXT: width is sampled at the actual text center Y, not the shape's vertical center.
+function computeLayout(splinePts) {
+  const ys = splinePts.map(p => p[1]);
+  const shapeTopY    = Math.min(...ys);
+  const shapeBottomY = Math.max(...ys);
+
+  // --- Hole placement ---
+  // Scan downward in fine steps until the hole circle fits entirely inside the shape.
+  const scanStep = 0.25; // mm — fine enough to catch narrow features
+  let holeCenterY = null;
+
+  for (let y = shapeTopY + HOLE_RADIUS_MM + HOLE_MARGIN_MM; y < shapeBottomY - HOLE_RADIUS_MM - HOLE_MARGIN_MM; y += scanStep) {
+    if (circleInsidePolygon(0, y, HOLE_RADIUS_MM, HOLE_MARGIN_MM, splinePts)) {
+      holeCenterY = y;
+      break;
+    }
+  }
+
+  // Fallback: if no valid position found (very spiky/small shape), place at shape centre
+  if (holeCenterY === null) {
+    holeCenterY = (shapeTopY + shapeBottomY) / 2;
+  }
+
+  // --- Text placement ---
+  // Text sits in the area between the bottom of the hole and the bottom of the shape.
+  const holeBotY    = holeCenterY + HOLE_RADIUS_MM;
+  const textAreaTop = holeBotY + HOLE_MARGIN_MM; // breathing room below the hole
+  const textCenterY = (textAreaTop + shapeBottomY) / 2;
+
+  // --- Max text width ---
+  // Sample the shape width at and around the actual text center Y (not the shape centre).
+  // Use point-in-polygon to find the left/right extent at each scan line.
+  const xs = splinePts.map(p => p[0]);
+  const shapeLeftX  = Math.min(...xs);
+  const shapeRightX = Math.max(...xs);
+
+  function widthAtY(targetY) {
+    // Binary-search inward from the known extents to find where the shape edge is
+    // at this Y, for both the left and right sides.
+    let leftEdge  = null;
+    let rightEdge = null;
+
+    // Use edge-crossing scan (same as before) — fast and exact for polygons
+    const crossings = [];
+    const N = splinePts.length;
+    for (let i = 0; i < N; i++) {
+      const a = splinePts[i], b = splinePts[(i + 1) % N];
+      if ((a[1] <= targetY && b[1] > targetY) || (b[1] <= targetY && a[1] > targetY)) {
+        const t = (targetY - a[1]) / (b[1] - a[1]);
+        crossings.push(a[0] + t * (b[0] - a[0]));
+      }
+    }
+    if (crossings.length < 2) return 0;
+    crossings.sort((a, b) => a - b);
+    return crossings[crossings.length - 1] - crossings[0];
+  }
+
+  // --- Max text width ---
+  // The text is centred at x=0. For concave shapes, widthAtY (outermost crossings)
+  // is wrong — we need the innermost pair of crossings that bracket x=0.
+  // We binary-search outward from x=0 to find where the shape edge is on each side.
+  function innerWidthAtY(targetY) {
+    // Walk outward from x=0 in small steps until we exit the polygon.
+    // This finds the closest left and right edges to the centre.
+    const step = 0.5; // mm resolution
+    const maxSearch = 200; // mm — larger than any tag
+
+    let rightEdge = 0;
+    for (let x = 0; x <= maxSearch; x += step) {
+      if (!pointInsidePolygon(x, targetY, splinePts)) { rightEdge = x - step; break; }
+      if (x === maxSearch) rightEdge = maxSearch;
+    }
+
+    let leftEdge = 0;
+    for (let x = 0; x >= -maxSearch; x -= step) {
+      if (!pointInsidePolygon(x, targetY, splinePts)) { leftEdge = x + step; break; }
+      if (x === -maxSearch) leftEdge = -maxSearch;
+    }
+
+    // If centre (x=0) is outside the shape at this Y, width is 0
+    if (!pointInsidePolygon(0, targetY, splinePts)) return 0;
+    return rightEdge - leftEdge;
+  }
+
+  // Sample width at several Y positions around where the text will sit.
+  // Use the minimum so the text always fits even in narrower parts of that zone.
+  const textZoneTop    = textCenterY - 8; // mm above text centre to sample
+  const textZoneBottom = textCenterY + 8; // mm below text centre to sample
+  const textZoneStep   = 2;               // sample every 2mm
+  let minWidth = Infinity;
+  for (let y = textZoneTop; y <= textZoneBottom; y += textZoneStep) {
+    const w = innerWidthAtY(y);
+    if (w > 0) minWidth = Math.min(minWidth, w);
+  }
+  const maxTextWidth = isFinite(minWidth) ? minWidth * 0.85 : 20;
+
+  return { holeCenterY, textCenterY, maxTextWidth };
+}
+
+// ============================================================
+//  PREVIEW RENDERING
+// ============================================================
+
+// Draws the sampled spline polygon on a canvas context (screen coords)
+function drawPolygon(ctx, screenPts) {
+  ctx.moveTo(screenPts[0][0], screenPts[0][1]);
+  for (let i = 1; i < screenPts.length; i++) ctx.lineTo(screenPts[i][0], screenPts[i][1]);
   ctx.closePath();
 }
 
+// ---- Text drag state ----
+// textPosMM holds the current text position in mm (canvas convention, Y-down).
+// null means "use the auto-computed position from computeLayout".
+// It is reset to null whenever the shape inputs change.
+let textPosMM      = null;   // { x, y } in mm, or null = auto
+let isDragging     = false;
+let dragStartMouse = null;   // canvas-px position when drag began
+let dragStartPos   = null;   // mm position when drag began
+
+// Resets text to the auto-layout position (called when shape inputs change)
+function resetTextPos() { textPosMM = null; }
+
+// lastDraw caches values from the most recent draw() call so the drag
+// handlers can do hit-testing and convert pixel deltas to mm.
+let lastDraw = { cx: 0, cy: 0, S: PREVIEW_SCALE, textSX: 0, textSY: 0, fontSize: 16, splinePts: [] };
+
 function draw() {
-  const name = document.getElementById('nameInput').value || 'TAG';
-  const sizeVal = parseInt(document.getElementById('sizeSlider').value);
+  const name       = document.getElementById('nameInput').value || 'TAG';
+  const surname    = document.getElementById('surnameInput').value || '';
+  const sizeVal    = parseInt(document.getElementById('sizeSlider').value);
   const complexVal = parseInt(document.getElementById('complexSlider').value);
-  const depthVal = parseInt(document.getElementById('depthSlider').value);
+  const depthVal   = parseInt(document.getElementById('depthSlider').value);
 
-  const sizeMap = [70, 100, 135];
-  const complexMap = [[16, 0.22], [26, 0.52], [38, 0.82]];
-  const baseR = sizeMap[sizeVal - 1];
-  const [numPts, variance] = complexMap[complexVal - 1];
-  const seed = nameToSeed(name);
+  const { numPoints, baseRadius } = SIZE_PRESETS[sizeVal];
+  const variance = COMPLEXITY_VARIANCE[complexVal - 1];
+  const seed     = combinedSeed(name, surname);
 
-  document.getElementById('seedBadge').textContent = 'seed: ' + seed;
-  document.getElementById('sizeLabel').textContent = ['Small','Medium','Large'][sizeVal - 1];
-  document.getElementById('complexLabel').textContent = ['Smooth','Medium','Spiky'][complexVal - 1];
-  document.getElementById('depthLabel').textContent = (depthVal / 10).toFixed(1) + 'mm';
+  // Update UI labels
+  document.getElementById('seedBadge').textContent    = 'seed: ' + seed;
+  document.getElementById('sizeLabel').textContent    = ['Small', 'Medium', 'Large'][sizeVal - 1];
+  document.getElementById('complexLabel').textContent = ['Smooth', 'Medium', 'Spiky'][complexVal - 1];
+  document.getElementById('depthLabel').textContent   = (depthVal / 10).toFixed(1) + 'mm';
 
   const canvas = document.getElementById('preview');
-  const ctx = canvas.getContext('2d');
+  const ctx    = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
-  const cx = W / 2, cy = H / 2 + 10;
+  const cx = W / 2, cy = H / 2; // canvas center = mm origin (0, 0)
+  const S = PREVIEW_SCALE;       // pixels per mm
 
   ctx.clearRect(0, 0, W, H);
 
-  const pts = generatePoints(seed, numPts, baseR, variance * baseR);
-  const screenPts = pts.map(([x, y]) => [cx + x, cy + y]);
+  // Generate shape — single pipeline shared with STL
+  const controlPts = generateOutlinePoints(seed, numPoints, baseRadius, variance);
+  const splinePts  = sampleSpline(controlPts, 8);
+  const screenPts  = splinePts.map(([x, y]) => [cx + x * S, cy + y * S]);
 
+  // Compute auto layout in mm
+  const layout = computeLayout(splinePts);
+
+  // Use dragged position if set, otherwise use auto-computed position
+  const textMM = textPosMM
+    ? textPosMM
+    : { x: 0, y: layout.textCenterY };
+
+  const holeCenterSY = cy + layout.holeCenterY * S;
+  const textSX       = cx + textMM.x * S;
+  const textSY       = cy + textMM.y * S;
+
+  // Font size: fit to shape width (using auto max width — stays stable during drag)
+  const maxTextWidthPx = layout.maxTextWidth * S;
+  let fontSize = Math.max(12, Math.min(40, baseRadius * S * 0.36));
+  ctx.font = '700 ' + fontSize + 'px Syne, sans-serif';
+  const measuredWidth = ctx.measureText(name.toUpperCase()).width;
+  if (measuredWidth > maxTextWidthPx) fontSize *= maxTextWidthPx / measuredWidth;
+  fontSize = Math.max(10, fontSize);
+
+  // Cache for drag hit-testing
+  lastDraw = { cx, cy, S, textSX, textSY, fontSize, splinePts, layout };
+
+  // --- Draw tag body ---
   ctx.beginPath();
-  catmullRomCanvas(ctx, screenPts);
+  drawPolygon(ctx, screenPts);
   ctx.fillStyle = '#222226';
   ctx.fill();
-
-  ctx.beginPath();
-  catmullRomCanvas(ctx, screenPts);
   ctx.strokeStyle = 'rgba(212,255,94,0.25)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  const topY = Math.min(...screenPts.map(p => p[1]));
-  const holeR = 10;
-  const holeCy = topY + holeR * 2.0;
-
+  // --- Draw strap hole ---
   ctx.beginPath();
-  ctx.arc(cx, holeCy, holeR, 0, Math.PI * 2);
+  ctx.arc(cx, holeCenterSY, HOLE_RADIUS_MM * S, 0, Math.PI * 2);
   ctx.fillStyle = '#0a0a0b';
   ctx.fill();
   ctx.strokeStyle = 'rgba(212,255,94,0.2)';
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  const fontSize = Math.max(16, Math.min(36, baseR * 0.36));
-  ctx.font = '700 ' + fontSize + 'px Syne, sans-serif';
-  ctx.fillStyle = '#d4ff5e';
-  ctx.textAlign = 'center';
+  // --- Draw name text ---
+  ctx.font        = '700 ' + Math.round(fontSize) + 'px Syne, sans-serif';
+  ctx.fillStyle   = '#d4ff5e';
+  ctx.textAlign   = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(name.toUpperCase(), cx, cy + 14);
+  ctx.fillText(name.toUpperCase(), textSX, textSY);
+
+  // Drag handle: dashed bounding box around text, visible when dragging or on hover
+  if (isDragging || textPosMM) {
+    const tw = ctx.measureText(name.toUpperCase()).width;
+    const th = fontSize;
+    const pad = 6;
+    ctx.save();
+    ctx.strokeStyle = isDragging ? 'rgba(212,255,94,0.9)' : 'rgba(212,255,94,0.45)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(textSX - tw/2 - pad, textSY - th/2 - pad, tw + pad*2, th + pad*2);
+    ctx.restore();
+  }
 }
 
-function smoothPoints(pts) {
-  const N = pts.length;
-  const out = [];
+// ============================================================
+//  STL GEOMETRY HELPERS
+// ============================================================
+
+// Normalises a 3D vector
+function vecNorm(v) {
+  const l = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+  return l === 0 ? [0, 0, 1] : [v[0]/l, v[1]/l, v[2]/l];
+}
+
+// Cross product of two 3D vectors
+function vecCross(a, b) {
+  return [
+    a[1]*b[2] - a[2]*b[1],
+    a[2]*b[0] - a[0]*b[2],
+    a[0]*b[1] - a[1]*b[0],
+  ];
+}
+
+// Creates a triangle with auto-computed normal from vertex winding order.
+function makeTri(a, b, c) {
+  const ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
+  const ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
+  return { normal: vecNorm(vecCross(ab, ac)), verts: [a, b, c] };
+}
+
+// Converts a canvas-space point (x, y) + elevation z into a 3D STL vertex.
+// Canvas Y increases downward; STL/slicer software expects Y increasing upward.
+// Negating Y here is the ONLY place the coordinate flip happens — nowhere else.
+function pt3(x, y, z) {
+  return [x, -y, z];
+}
+
+// Builds top and bottom faces of the tag body (fan triangulation from origin).
+// With Y negated, the original CCW winding becomes CW when viewed from +Z,
+// so we swap a↔b to restore outward-facing normals.
+function buildBodyFaces(points, zBottom, zTop) {
+  const tris = [];
+  const N = points.length;
   for (let i = 0; i < N; i++) {
-    const prev = pts[(i - 1 + N) % N];
-    const curr = pts[i];
-    const next = pts[(i + 1) % N];
-    out.push([(prev[0] + curr[0] * 2 + next[0]) / 4, (prev[1] + curr[1] * 2 + next[1]) / 4]);
+    const a = points[i], b = points[(i + 1) % N];
+    // Top face — swap a,b so normal points up (+Z) after Y-flip
+    tris.push(makeTri(pt3(0,0,zTop),    pt3(b[0],b[1],zTop),    pt3(a[0],a[1],zTop)));
+    // Bottom face — swap a,b so normal points down (-Z) after Y-flip
+    tris.push(makeTri(pt3(0,0,zBottom), pt3(a[0],a[1],zBottom), pt3(b[0],b[1],zBottom)));
   }
-  return out;
+  return tris;
 }
 
-function downloadSTL() {
-  const name = document.getElementById('nameInput').value || 'TAG';
-  const sizeVal = parseInt(document.getElementById('sizeSlider').value);
-  const complexVal = parseInt(document.getElementById('complexSlider').value);
-
-  const sizeMap = [25, 35, 45];
-  const complexMap = [[16, 0.22], [26, 0.52], [38, 0.82]];
-  const baseR = sizeMap[sizeVal - 1];
-  const [numPts, variance] = complexMap[complexVal - 1];
-  const seed = nameToSeed(name);
-  const thickness = 4;
-
-  const rawPts = generatePoints(seed, numPts, baseR, variance * baseR);
-  const pts = smoothPoints(rawPts);
-  const N = pts.length;
-
-  function norm(v) {
-    const l = Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
-    return l === 0 ? [0,0,1] : [v[0]/l, v[1]/l, v[2]/l];
+// Builds the side walls of the tag body.
+function buildBodyWalls(points, zBottom, zTop) {
+  const tris = [];
+  const N = points.length;
+  for (let i = 0; i < N; i++) {
+    const a = points[i], b = points[(i + 1) % N];
+    // Swap a↔b to keep outward normals after Y-flip
+    tris.push(makeTri(pt3(b[0],b[1],zBottom), pt3(a[0],a[1],zBottom), pt3(a[0],a[1],zTop)));
+    tris.push(makeTri(pt3(b[0],b[1],zBottom), pt3(a[0],a[1],zTop),    pt3(b[0],b[1],zTop)));
   }
-  function cross(a, b) {
-    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
-  }
+  return tris;
+}
 
+// Builds the cylindrical strap hole (reversed winding cuts into the body).
+function buildHole(holeCx, holeCy, holeRadius, segments, zBottom, zTop) {
+  const tris = [];
+  for (let i = 0; i < segments; i++) {
+    const a1 = (2 * Math.PI * i)       / segments;
+    const a2 = (2 * Math.PI * (i + 1)) / segments;
+    const x1 = holeCx + holeRadius * Math.cos(a1), y1 = holeCy + holeRadius * Math.sin(a1);
+    const x2 = holeCx + holeRadius * Math.cos(a2), y2 = holeCy + holeRadius * Math.sin(a2);
+
+    // Top disc — reversed relative to body top (cuts hole)
+    tris.push(makeTri(pt3(x2,y2,zTop),    pt3(holeCx,holeCy,zTop),    pt3(x1,y1,zTop)));
+    // Bottom disc — reversed relative to body bottom (cuts hole)
+    tris.push(makeTri(pt3(x1,y1,zBottom), pt3(holeCx,holeCy,zBottom), pt3(x2,y2,zBottom)));
+    // Inner cylinder wall — normals point inward toward hole axis
+    tris.push(makeTri(pt3(x2,y2,zBottom), pt3(x1,y1,zTop),    pt3(x2,y2,zTop)));
+    tris.push(makeTri(pt3(x2,y2,zBottom), pt3(x1,y1,zBottom), pt3(x1,y1,zTop)));
+  }
+  return tris;
+}
+
+// Builds raised text geometry using opentype.js glyph outlines.
+// textCenterY: Y in canvas space (Y-down) where text is vertically centred.
+// maxWidthMM:  maximum allowed text width in mm.
+// All geometry is assembled in canvas space, then pt3() applies the Y-flip for STL output.
+function buildTextGeometry(name, font, textDepth, zBase, textCenterY, maxWidthMM) {
   const tris = [];
 
-  function addTri(a, b, c) {
-    const ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-    const ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-    tris.push({ n: norm(cross(ab, ac)), v: [a, b, c] });
-  }
+  const glyphs = font.stringToGlyphs(name.toUpperCase());
 
-  for (let i = 0; i < N; i++) {
-    const a = pts[i], b = pts[(i+1)%N];
-    addTri([0,0,thickness], [a[0],a[1],thickness], [b[0],b[1],thickness]);
-    addTri([0,0,0], [b[0],b[1],0], [a[0],a[1],0]);
-    addTri([a[0],a[1],0], [b[0],b[1],0], [b[0],b[1],thickness]);
-    addTri([a[0],a[1],0], [b[0],b[1],thickness], [a[0],a[1],thickness]);
-  }
+  // Total advance in font units, then derive font size so text fills maxWidthMM
+  let totalAdvanceUnits = 0;
+  glyphs.forEach(g => { totalAdvanceUnits += g.advanceWidth; });
+  const fontSize = maxWidthMM / (totalAdvanceUnits / font.unitsPerEm);
+  const scale    = fontSize / font.unitsPerEm;
 
-  const topY = Math.min(...pts.map(p => p[1]));
-  const holeR = 3.5, holeSegs = 24;
-  const holeCy = topY + holeR * 2.2;
+  // Start cursor so text is centred at x=0
+  let cursorX = -(totalAdvanceUnits * scale) / 2;
 
-  for (let i = 0; i < holeSegs; i++) {
-    const a1 = (2*Math.PI*i)/holeSegs, a2 = (2*Math.PI*(i+1))/holeSegs;
-    const x1 = holeR*Math.cos(a1), y1 = holeR*Math.sin(a1);
-    const x2 = holeR*Math.cos(a2), y2 = holeR*Math.sin(a2);
-    addTri([x1,holeCy+y1,0], [0,holeCy,0], [x2,holeCy+y2,0]);
-    addTri([x2,holeCy+y2,thickness], [0,holeCy,thickness], [x1,holeCy+y1,thickness]);
-    addTri([x1,holeCy+y1,0], [x1,holeCy+y1,thickness], [x2,holeCy+y2,thickness]);
-    addTri([x1,holeCy+y1,0], [x2,holeCy+y2,thickness], [x2,holeCy+y2,0]);
-  }
+  glyphs.forEach(glyph => {
+    const commands = glyph.path.commands;
+    const contours = [];
+    let current    = [];
 
-  const buf = new ArrayBuffer(84 + tris.length * 50);
+    // Parse glyph path into canvas-space contours.
+    // Font Y is bottom-up; we flip it to canvas Y-down with (textCenterY - cmd.y*scale).
+    commands.forEach(cmd => {
+      if (cmd.type === 'M') {
+        if (current.length > 0) contours.push(current);
+        current = [[cursorX + cmd.x * scale, textCenterY - cmd.y * scale]];
+      } else if (cmd.type === 'L') {
+        current.push([cursorX + cmd.x * scale, textCenterY - cmd.y * scale]);
+      } else if (cmd.type === 'Q') {
+        const prev = current[current.length - 1];
+        const steps = 6;
+        for (let step = 1; step <= steps; step++) {
+          const u = step / steps;
+          const x = (1-u)*(1-u)*prev[0] + 2*(1-u)*u*(cursorX+cmd.x1*scale) + u*u*(cursorX+cmd.x*scale);
+          const y = (1-u)*(1-u)*prev[1] + 2*(1-u)*u*(textCenterY-cmd.y1*scale) + u*u*(textCenterY-cmd.y*scale);
+          current.push([x, y]);
+        }
+      } else if (cmd.type === 'C') {
+        const prev = current[current.length - 1];
+        const steps = 8;
+        for (let step = 1; step <= steps; step++) {
+          const u = step / steps;
+          const x = Math.pow(1-u,3)*prev[0] + 3*Math.pow(1-u,2)*u*(cursorX+cmd.x1*scale) + 3*(1-u)*u*u*(cursorX+cmd.x2*scale) + u*u*u*(cursorX+cmd.x*scale);
+          const y = Math.pow(1-u,3)*prev[1] + 3*Math.pow(1-u,2)*u*(textCenterY-cmd.y1*scale) + 3*(1-u)*u*u*(textCenterY-cmd.y2*scale) + u*u*u*(textCenterY-cmd.y*scale);
+          current.push([x, y]);
+        }
+      } else if (cmd.type === 'Z') {
+        if (current.length > 0) { contours.push(current); current = []; }
+      }
+    });
+    if (current.length > 0) contours.push(current);
+
+    contours.forEach(contour => {
+      if (contour.length < 3) return;
+      const N = contour.length;
+
+      // Top face of raised letter — fan from first vertex.
+      // pt3 negates Y, reversing winding; swap i and i+1 to restore upward normal.
+      for (let i = 1; i < N - 1; i++) {
+        tris.push(makeTri(
+          pt3(contour[0][0],   contour[0][1],   zBase + textDepth),
+          pt3(contour[i+1][0], contour[i+1][1], zBase + textDepth),
+          pt3(contour[i][0],   contour[i][1],   zBase + textDepth)
+        ));
+      }
+
+      // Side walls — swap winding to keep outward normals after Y-flip
+      for (let i = 0; i < N; i++) {
+        const a = contour[i], b = contour[(i + 1) % N];
+        tris.push(makeTri(pt3(a[0],a[1],zBase), pt3(b[0],b[1],zBase),           pt3(b[0],b[1],zBase+textDepth)));
+        tris.push(makeTri(pt3(a[0],a[1],zBase), pt3(b[0],b[1],zBase+textDepth), pt3(a[0],a[1],zBase+textDepth)));
+      }
+    });
+
+    cursorX += glyph.advanceWidth * scale;
+  });
+
+  return tris;
+}
+
+// Serialises a triangle array to binary STL format and triggers a download
+function writeSTL(tris, filename) {
+  const buf  = new ArrayBuffer(84 + tris.length * 50);
   const view = new DataView(buf);
   let off = 80;
-  view.setUint32(off, tris.length, true); off += 4;
-  for (const t of tris) {
-    [t.n[0], t.n[1], t.n[2]].forEach(v => { view.setFloat32(off, v, true); off += 4; });
-    t.v.forEach(v => v.forEach(c => { view.setFloat32(off, c, true); off += 4; }));
+
+  view.setUint32(off, tris.length, true);
+  off += 4;
+
+  for (const tri of tris) {
+    view.setFloat32(off, tri.normal[0], true); off += 4;
+    view.setFloat32(off, tri.normal[1], true); off += 4;
+    view.setFloat32(off, tri.normal[2], true); off += 4;
+    for (const vert of tri.verts) {
+      view.setFloat32(off, vert[0], true); off += 4;
+      view.setFloat32(off, vert[1], true); off += 4;
+      view.setFloat32(off, vert[2], true); off += 4;
+    }
     view.setUint16(off, 0, true); off += 2;
   }
 
   const blob = new Blob([buf], { type: 'application/octet-stream' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'tag_' + name.toLowerCase() + '.stl';
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
 }
 
+// ============================================================
+//  STL EXPORT — assembles all geometry and triggers download
+// ============================================================
+
+async function downloadSTL() {
+  const name       = document.getElementById('nameInput').value || 'TAG';
+  const surname    = document.getElementById('surnameInput').value || '';
+  const sizeVal    = parseInt(document.getElementById('sizeSlider').value);
+  const complexVal = parseInt(document.getElementById('complexSlider').value);
+  const depthVal   = parseInt(document.getElementById('depthSlider').value);
+
+  const { numPoints, baseRadius } = SIZE_PRESETS[sizeVal];
+  const variance  = COMPLEXITY_VARIANCE[complexVal - 1];
+  const seed      = combinedSeed(name, surname);
+  const textDepth = depthVal / 10; // slider value → mm
+
+  const zBottom = 0;
+  const zTop    = TAG_THICKNESS_MM;
+
+  // Generate shape — same pipeline as preview, same spline samples
+  const controlPts = generateOutlinePoints(seed, numPoints, baseRadius, variance);
+  const splinePts  = sampleSpline(controlPts, 8);
+
+  // Compute layout in mm — same function as preview uses
+  const layout = computeLayout(splinePts);
+
+  let allTris = [];
+  allTris = allTris.concat(buildBodyFaces(splinePts, zBottom, zTop));
+  allTris = allTris.concat(buildBodyWalls(splinePts, zBottom, zTop));
+  allTris = allTris.concat(buildHole(0, layout.holeCenterY, HOLE_RADIUS_MM, HOLE_SEGMENTS, zBottom, zTop));
+
+  try {
+    const font = await opentype.load(TEXT_FONT_URL);
+    allTris = allTris.concat(
+      buildTextGeometry(name, font, textDepth, zTop, layout.textCenterY, layout.maxTextWidth)
+    );
+  } catch (e) {
+    console.warn('Font failed to load, skipping text emboss:', e);
+  }
+
+  writeSTL(allTris, 'tag_' + name.toLowerCase() + '.stl');
+}
+
+// ============================================================
+//  INIT — wire up inputs and draw initial preview
+// ============================================================
+
 document.getElementById('nameInput').addEventListener('input', draw);
+document.getElementById('surnameInput').addEventListener('input', draw);
 document.getElementById('sizeSlider').addEventListener('input', draw);
 document.getElementById('complexSlider').addEventListener('input', draw);
 document.getElementById('depthSlider').addEventListener('input', draw);
